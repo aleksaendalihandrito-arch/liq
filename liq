@@ -2,13 +2,14 @@ from websocket import WebSocketApp
 import json
 import time
 import requests
+import os  # Добавляем для переменных окружения
 from datetime import datetime
 
-# Настройки
-TELEGRAM_BOT_TOKEN = '7572230525:AAFzAQsMe4DlTYAA8G5UgGnYH598ZxgZOjs'
-TELEGRAM_CHAT_ID = '5296533274'
-LIQUIDATION_THRESHOLD = 50000  # Минимальная сумма ликвидации в USD
-TEST_MODE = False
+# Настройки - БЕРЕМ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ
+TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '7572230525:AAFzAQsMe4DlTYAA8G5UgGnYH598ZxgZOjs')
+TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '5296533274')
+LIQUIDATION_THRESHOLD = int(os.environ.get('LIQUIDATION_THRESHOLD', 50000))
+TEST_MODE = os.environ.get('TEST_MODE', 'False').lower() == 'true'
 
 # Топ-25 монет по рыночной капитализации
 TOP_25_COINS = {
@@ -19,11 +20,9 @@ TOP_25_COINS = {
     'APTUSDT', 'HBARUSDT', 'NEARUSDT', 'VETUSDT', 'OPUSDT', 'BTCUSDC'
 }
 
-
 def log(message):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{timestamp}] {message}")
-
+    print(f"[{timestamp}] {message}", flush=True)  # Добавляем flush=True для Railway
 
 def generate_links(symbol):
     """Генерация ссылок на аналитические ресурсы"""
@@ -35,15 +34,11 @@ def generate_links(symbol):
         'bybit': f"https://www.bybit.com/trade/usdt/{symbol}"
     }
 
-
 def send_telegram_alert(message, symbol):
     try:
         log(f"Отправка: {message[:50]}...")
 
-        # Генерируем ссылки для символа
         links = generate_links(symbol)
-
-        # Добавляем ссылки к сообщению
         message_with_links = (
             f"{message}\n\n"
             f"🔗 <b>Быстрый анализ:</b>\n"
@@ -53,7 +48,6 @@ def send_telegram_alert(message, symbol):
             f"• ⚡ <a href='{links['bybit']}'>Bybit</a>"
         )
 
-        # Используем моноширинный шрифт для символа в сообщении
         monospace_symbol = f"<code>{symbol}</code>"
         message_with_links = message_with_links.replace(symbol, monospace_symbol)
 
@@ -64,7 +58,7 @@ def send_telegram_alert(message, symbol):
             'parse_mode': 'HTML',
             'disable_web_page_preview': False
         }
-        response = requests.post(url, json=payload)
+        response = requests.post(url, json=payload, timeout=10)
         response.raise_for_status()
         log("Сообщение отправлено в Telegram")
         return True
@@ -72,16 +66,13 @@ def send_telegram_alert(message, symbol):
         log(f"ОШИБКА Telegram: {str(e)}")
         return False
 
-
 def is_top_coin(symbol):
     """Проверяем, является ли монета топ-25"""
     return symbol in TOP_25_COINS
 
-
 def on_message(ws, message):
     try:
         log(f"Получены данные: {message[:100]}...")
-
         data = json.loads(message)
 
         if TEST_MODE:
@@ -99,12 +90,11 @@ def on_message(ws, message):
             liq = data['o']
             symbol = liq.get('s', 'UNKNOWN')
 
-            # Проверяем, не является ли монета топ-25
             if is_top_coin(symbol):
                 log(f"Игнорируем топ-монету: {symbol}")
                 return
 
-            side = liq.get('S')  # 'BUY' или 'SELL'
+            side = liq.get('S')
             quantity = float(liq.get('q', 0))
             price = float(liq.get('ap', 0))
             usd_value = quantity * price
@@ -112,8 +102,6 @@ def on_message(ws, message):
 
             log(f"Обработка: {symbol} {side} ${usd_value:,.0f}")
 
-            # ФИЛЬТРАЦИЯ: отправляем только ШОРТЫ (SHORT) - когда цена растет
-            # В Binance: 'SELL' = ликвидация LONG, 'BUY' = ликвидация SHORT
             if side == 'BUY' and usd_value >= LIQUIDATION_THRESHOLD:
                 msg = (
                     f"📈 <b>Рост цены + Ликвидация SHORT</b>\n"
@@ -133,18 +121,13 @@ def on_message(ws, message):
     except Exception as e:
         log(f"КРИТИЧЕСКАЯ ОШИБКА: {str(e)}")
 
-
 def on_error(ws, error):
     log(f"ОШИБКА WebSocket: {str(error)}")
     time.sleep(5)
-    connect_websocket()
-
 
 def on_close(ws, close_status_code, close_msg):
     log(f"Соединение закрыто. Код: {close_status_code}, Причина: {close_msg}")
     time.sleep(2)
-    connect_websocket()
-
 
 def on_open(ws):
     log("Успешное подключение к Binance WebSocket")
@@ -154,31 +137,34 @@ def on_open(ws):
     if TEST_MODE:
         log("Тестовый режим активирован")
 
-
 def connect_websocket():
     log("Попытка подключения к WebSocket...")
-    try:
-        ws = WebSocketApp("wss://fstream.binance.com/ws/!forceOrder@arr",
-                          on_open=on_open,
-                          on_message=on_message,
-                          on_error=on_error,
-                          on_close=on_close)
-        ws.run_forever()
-    except Exception as e:
-        log(f"ОШИБКА ПОДКЛЮЧЕНИЯ: {str(e)}")
-
+    while True:  # Бесконечный цикл переподключения
+        try:
+            ws = WebSocketApp("wss://fstream.binance.com/ws/!forceOrder@arr",
+                              on_open=on_open,
+                              on_message=on_message,
+                              on_error=on_error,
+                              on_close=on_close)
+            ws.run_forever()
+        except Exception as e:
+            log(f"ОШИБКА ПОДКЛЮЧЕНИЯ: {str(e)}")
+        log("Переподключение через 5 секунд...")
+        time.sleep(5)
 
 if __name__ == "__main__":
-    log("Запуск бота ликвидаций")
+    log("=" * 50)
+    log("ЗАПУСК БОТА ЛИКВИДАЦИЙ НА RAILWAY")
+    log("=" * 50)
     log(f"Игнорируемые монеты: {len(TOP_25_COINS)} топовых")
-    log("Отслеживаю только SHORT ликвидации (рост цены)")
+    log(f"Порог ликвидации: ${LIQUIDATION_THRESHOLD}")
+    log(f"Режим тестирования: {TEST_MODE}")
 
     try:
         import websocket
-
-        log("Все зависимости установлены")
+        log("✓ Библиотека websocket загружена")
     except ImportError as e:
-        log(f"ОШИБКА: Не установлены зависимости - {str(e)}")
+        log(f"✗ ОШИБКА: Не установлены зависимости - {str(e)}")
         exit(1)
 
     connect_websocket()
